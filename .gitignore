@@ -1,6 +1,7 @@
 # Dataset / crawled data
 data_photo_coupler/
 data_photo*/
+data_photo_coupler_v2/
 
 # RAG generated data
 work/

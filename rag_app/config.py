@@ -17,7 +17,7 @@ from pathlib import Path
 DATA_DIR = Path(
     os.environ.get(
         "RAG_DATA_DIR",
-        "/home/skyler/Desktop/rag_system/data_photo_coupler",
+        "/home/.../data_photo_coupler_v2", # path to your data
     )
 ).expanduser()
 
