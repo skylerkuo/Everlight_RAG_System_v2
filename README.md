@@ -51,39 +51,66 @@ rag_app/qa/
 
 ---
 
-# 2. 資料來源與資料格式
+# 2. 轉 Markdown 前，來源資料要先整理成什麼格式
 
-## 2.1 原始資料來源
+這一節是交接時最重要的資料規格。
 
-目前系統預期資料來源包含：
+`prepare-html` 與 `prepare-pdf` **不是直接掃描任意資料夾中的所有檔案**。  
+程式會先讀取「文件 Metadata」，取得每一份文件的：
 
 ```text
-1. 網頁 HTML
-2. 爬蟲整理後的 TXT
-3. PDF 技術文件
+document_id
+source_kind
+title
+source_url
+raw_path
+text_path
+language
+page_count
 ```
 
-資料預設放在：
+再依 Metadata 指向的實際 HTML / TXT / PDF 檔案進行處理。
+
+因此，IT 若要加入新的網站資料或 PDF，必須先把資料整理成下列格式，再執行 Markdown 轉換。
+
+---
+
+## 2.1 DATA_DIR 最少需要的來源資料結構
+
+預設資料根目錄：
+
+```text
+/home/skyler/Desktop/rag_system/data_photo_coupler
+```
+
+也就是程式中的：
 
 ```python
-DATA_DIR = Path("/home/skyler/Desktop/rag_system/data_photo_coupler")
+DATA_DIR
 ```
 
-也可以使用環境變數指定：
-
-```bash
-export RAG_DATA_DIR=/your/path/data_photo_coupler
-```
-
-原始資料建議整理為：
+在進行 Markdown 轉換以前，建議整理成：
 
 ```text
 DATA_DIR/
 ├── raw/
 │   ├── html/
+│   │   ├── <document_id_1>.html
+│   │   ├── <document_id_2>.html
+│   │   └── ...
+│   │
 │   └── pdf/
+│       ├── <document_id_3>.pdf
+│       ├── <document_id_4>.pdf
+│       └── ...
+│
 ├── text/
+│   ├── <document_id_1>.txt
+│   ├── <document_id_2>.txt
+│   └── ...
+│
 ├── everlight.db
+│
 └── rag_ready/
     └── documents.jsonl
 ```
@@ -94,112 +121,880 @@ DATA_DIR/
 raw/html/
 ```
 
-保存原始 HTML。
+放爬蟲下載的原始 HTML。
 
 ```text
 raw/pdf/
 ```
 
-保存下載的 PDF。
+放爬蟲下載的原始 PDF。
 
 ```text
 text/
 ```
 
-保存爬蟲已經整理完成的文字資料。
+放 HTML 已經由爬蟲抽取出的純文字 TXT。
 
 ```text
 everlight.db
 ```
 
-保存爬蟲與文件相關資料。
+是原爬蟲使用的 Metadata Database。
 
 ```text
 rag_ready/documents.jsonl
 ```
 
-作為後續 RAG 文件處理所使用的文件清單。
+是沒有使用 `everlight.db` 時，可以提供給 RAG 的替代 Metadata 格式。
 
 ---
 
-## 2.2 RAG 處理後的資料格式
+## 2.2 document_id 的用途
 
-前處理完成後，RAG 相關產物會放在：
+每一份來源文件都必須有一個唯一的：
 
 ```text
-DATA_DIR/rag_v6/
+document_id
 ```
 
-預期結構如下：
+目前原爬蟲使用：
 
 ```text
-rag_v6/
-├── txt/
-│   └── html/
-├── md/
+SHA-256
+```
+
+作為 `document_id`。
+
+例如：
+
+```text
+8a3c0a9d8f7e.......
+```
+
+建議檔名也直接使用相同的 `document_id`：
+
+```text
+raw/html/8a3c0a9d8f7e....html
+text/8a3c0a9d8f7e....txt
+```
+
+HTML 與其對應的 TXT 必須使用同一個 Metadata record，兩者代表的是**同一份網頁文件**。
+
+PDF 則例如：
+
+```text
+raw/pdf/f19b3225cac3c9ac....pdf
+```
+
+對應：
+
+```text
+document_id = f19b3225cac3c9ac...
+```
+
+`document_id` 不一定技術上必須是 SHA-256，但必須：
+
+```text
+1. 每份文件唯一
+2. 不要重複
+3. 同一份文件在後續 Markdown、Chunk、Index 階段保持不變
+```
+
+為了與目前系統一致，建議繼續使用 SHA-256。
+
+---
+
+# 2.3 Metadata 有兩種提供方式
+
+目前程式支援兩種 Metadata 來源：
+
+```text
+方法 A：everlight.db
+方法 B：rag_ready/documents.jsonl
+```
+
+讀取優先順序是：
+
+```text
+everlight.db 存在且可讀到資料
+        ↓
+優先使用 everlight.db
+
+如果 DB 不存在、無法讀取或沒有有效資料
+        ↓
+改讀 rag_ready/documents.jsonl
+```
+
+因此：
+
+> 若 `everlight.db` 中已經存在有效資料，修改 `documents.jsonl` 不會取代 DB 內容。
+
+IT 在匯入新資料時必須清楚目前部署環境是使用哪一種 Metadata 來源。
+
+---
+
+# 2.4 方法 A：維持原爬蟲 `everlight.db` 格式
+
+目前 RAG 會從 SQLite 執行類似以下查詢：
+
+```sql
+SELECT
+    dv.sha256,
+    dv.title,
+    dv.raw_path,
+    dv.text_path,
+    dv.page_count,
+    u.url,
+    u.kind,
+    u.language
+FROM document_versions dv
+JOIN urls u ON u.id = dv.url_id
+WHERE dv.is_current = 1
+```
+
+因此原爬蟲 DB 至少需要能提供下列欄位。
+
+### `urls`
+
+```text
+id
+url
+kind
+language
+```
+
+其中：
+
+```text
+kind = "html"
+```
+
+代表 HTML 文件。
+
+```text
+kind = "pdf"
+```
+
+代表 PDF 文件。
+
+### `document_versions`
+
+```text
+url_id
+sha256
+title
+raw_path
+text_path
+page_count
+is_current
+```
+
+其中：
+
+```text
+sha256
+```
+
+會被當成：
+
+```text
+document_id
+```
+
+而：
+
+```text
+is_current = 1
+```
+
+才會被 RAG 當成目前有效版本。
+
+---
+
+## 2.4.1 HTML 在 DB 中應該對應成什麼樣子
+
+例如：
+
+```text
+document_id:
+abc123...
+
+kind:
+html
+
+title:
+Photo Transistor | LED產業的領導廠商 | 億光電子
+
+url:
+https://www.everlight.com/...
+
+raw_path:
+raw/html/abc123....html
+
+text_path:
+text/abc123....txt
+
+language:
+zh-TW
+
+page_count:
+NULL
+```
+
+對應實體檔案：
+
+```text
+DATA_DIR/
+├── raw/html/abc123....html
+└── text/abc123....txt
+```
+
+---
+
+## 2.4.2 PDF 在 DB 中應該對應成什麼樣子
+
+例如：
+
+```text
+document_id:
+def456...
+
+kind:
+pdf
+
+title:
+Photo Coupler Selection Guide
+
+url:
+https://www.everlight.com/download/...
+
+raw_path:
+raw/pdf/def456....pdf
+
+text_path:
+NULL
+
+language:
+zh-TW
+
+page_count:
+35
+```
+
+對應實體檔案：
+
+```text
+DATA_DIR/
+└── raw/pdf/def456....pdf
+```
+
+PDF 不需要先轉 TXT。
+
+PDF 後續會直接：
+
+```text
+PDF
+↓
+PyMuPDF Render
+↓
+Page Image
+↓
+Qwen3.5-4B
+↓
+Markdown
+```
+
+---
+
+# 2.5 方法 B：使用 `rag_ready/documents.jsonl`
+
+如果 IT 不需要沿用原本的爬蟲 DB，也可以直接建立：
+
+```text
+DATA_DIR/rag_ready/documents.jsonl
+```
+
+這是最容易交接、也最容易人工產生的 Metadata 格式。
+
+格式是：
+
+```text
+一行 = 一份來源文件
+```
+
+不是一整個 JSON Array。
+
+也就是：
+
+```json
+{"document_id":"doc1", ...}
+{"document_id":"doc2", ...}
+{"document_id":"doc3", ...}
+```
+
+而不是：
+
+```json
+[
+  {"document_id":"doc1"},
+  {"document_id":"doc2"}
+]
+```
+
+---
+
+## 2.5.1 HTML 的 `documents.jsonl` 範例
+
+假設有：
+
+```text
+raw/html/abc123.html
+text/abc123.txt
+```
+
+則 `documents.jsonl` 可寫：
+
+```json
+{"document_id":"abc123","source_kind":"html","title":"Photo Transistor | LED產業的領導廠商 | 億光電子","source_url":"https://www.everlight.com/photo_coupler_igbt_ssr/category-photo_transistor/","raw_path":"raw/html/abc123.html","text_path":"text/abc123.txt","language":"zh-TW","page_count":null}
+```
+
+欄位意義：
+
+| 欄位 | HTML 是否需要 | 說明 |
+|---|---|---|
+| `document_id` | 必要 | 唯一文件 ID |
+| `source_kind` | 必要 | 必須填 `html` |
+| `title` | 強烈建議 | 原始網頁標題 |
+| `source_url` | 強烈建議 | 原始網頁 URL |
+| `raw_path` | 必要 | 相對於 `DATA_DIR` 的 HTML 路徑 |
+| `text_path` | 建議 | 爬蟲已抽出的 TXT；若無可填 `null` |
+| `language` | 選填 | 例如 `zh-TW`、`en` |
+| `page_count` | 不需要 | HTML 通常填 `null` |
+
+---
+
+## 2.5.2 PDF 的 `documents.jsonl` 範例
+
+假設：
+
+```text
+raw/pdf/def456.pdf
+```
+
+則：
+
+```json
+{"document_id":"def456","source_kind":"pdf","title":"Photo Coupler Selection Guide","source_url":"https://www.everlight.com/download/photo-coupler-selection-guide/","raw_path":"raw/pdf/def456.pdf","text_path":null,"language":"zh-TW","page_count":35}
+```
+
+欄位：
+
+| 欄位 | PDF 是否需要 | 說明 |
+|---|---|---|
+| `document_id` | 必要 | 唯一文件 ID |
+| `source_kind` | 必要 | 必須填 `pdf` |
+| `title` | 強烈建議 | PDF 文件名稱 |
+| `source_url` | 強烈建議 | PDF 原始下載網址 |
+| `raw_path` | 必要 | 相對於 `DATA_DIR` 的 PDF 路徑 |
+| `text_path` | 不使用 | 建議 `null` |
+| `language` | 選填 | 文件主要語言 |
+| `page_count` | 建議 | PDF 頁數；實際處理仍會直接讀 PDF 頁數 |
+
+---
+
+# 2.6 `raw_path` 與 `text_path` 要怎麼填
+
+建議全部使用：
+
+```text
+相對於 DATA_DIR 的路徑
+```
+
+例如：
+
+```text
+raw/html/abc123.html
+text/abc123.txt
+raw/pdf/def456.pdf
+```
+
+不要在 Metadata 中寫死：
+
+```text
+/home/skyler/Desktop/...
+```
+
+否則交接到其他 IT 主機時會失去可攜性。
+
+程式實際會用：
+
+```python
+DATA_DIR / raw_path
+```
+
+或：
+
+```python
+DATA_DIR / text_path
+```
+
+找到檔案。
+
+---
+
+# 2.7 HTML 為什麼同時有 HTML 與 TXT
+
+HTML 文件的處理邏輯是：
+
+```text
+Metadata
+↓
+有 text_path？
+├─ 有，而且 TXT 檔存在
+│      ↓
+│   直接使用 TXT
+│
+└─ 沒有 / TXT 不存在
+       ↓
+    使用 raw_path 的 HTML
+       ↓
+    BeautifulSoup
+       ↓
+    自動抽取純文字
+```
+
+因此最建議的爬蟲輸出是：
+
+```text
+原始 HTML
++
+已抽取 TXT
++
+Metadata
+```
+
+例如：
+
+```text
+raw/html/abc123.html
+text/abc123.txt
+```
+
+這樣 RAG 會直接使用：
+
+```text
+text/abc123.txt
+```
+
+而不需要重新從 HTML 抽文字。
+
+如果只有：
+
+```text
+raw/html/abc123.html
+```
+
+也可以處理。
+
+這時 `text_path` 可設：
+
+```json
+"text_path": null
+```
+
+程式會使用 BeautifulSoup 抽取文字，並把中間 TXT 寫到：
+
+```text
+rag_v6/txt/html/<document_id>.txt
+```
+
+---
+
+# 2.8 TXT 在進 Qwen 以前建議保留哪些內容
+
+TXT 的目的是保存網頁中的**可檢索技術文字**。
+
+應盡量保留：
+
+```text
+產品名稱
+產品型號
+產品系列
+Section Heading
+產品描述
+產品特性
+技術規格
+數值
+單位
+封裝
+CTR
+Isolation Voltage
+CMTI
+工作溫度
+應用場合
+表格文字
+下載文件名稱
+```
+
+例如好的 TXT：
+
+```text
+8Pin Wide Body
+
+The ELW3120 consists of an infrared light emitting diodes and integrated
+high gain, high-speed photo detectors.
+
+The device is housed in an 8 pin DIP wide body package and available
+in SMD package option.
+
+產品特性
+輸出電流最大 2.5A
+保證性能從 -40°C 至 110°C
+輸入和輸出之間的隔離電壓 5000Vrms
+外部爬電距離大於 10 mm
+
+產品應用
+隔離驅動 IGBT/Power MOSFET
+不間斷電源供應
+變頻器
+```
+
+不需要特別自己先整理成 Markdown。
+
+因為：
+
+```text
+TXT
+↓
+Qwen3.5-4B
+↓
+Markdown
+```
+
+Markdown 的 Heading、Bullet、Table 會由 Qwen 再整理。
+
+---
+
+## 2.8.1 不要只留下產品型號
+
+不建議整理成：
+
+```text
+ELW3120
+2.5A
+5000Vrms
+```
+
+這樣會失去：
+
+```text
+數值與欄位的關係
+產品描述
+產品應用
+上下文
+```
+
+應盡量保留原始文字結構。
+
+---
+
+## 2.8.2 可以移除的 HTML 雜訊
+
+爬蟲若能先移除以下內容會比較乾淨：
+
+```text
+Cookie banner
+JavaScript
+CSS
+重複 Navigation
+Footer 導航
+社群按鈕
+完全無內容的下載 Placeholder
+重複 Header
+```
+
+即使沒有完全移除，後續 Qwen Markdown Cleaning Prompt 仍會再做一次整理。
+
+但：
+
+> 不要因為看起來像網站模板，就把產品名稱、產品分類、規格標題或技術內容刪掉。
+
+---
+
+# 2.9 PDF 不要先拆成 TXT
+
+PDF 進入本專案前，只需要：
+
+```text
+原始 PDF
++
+Metadata
+```
+
+例如：
+
+```text
+raw/pdf/def456.pdf
+```
+
+後續系統會自己產生：
+
+```text
+page_images/def456/page_0001.png
+page_images/def456/page_0002.png
+...
+```
+
+再逐頁轉成：
+
+```text
+md/pdf/def456/page_0001.md
+md/pdf/def456/page_0002.md
+...
+```
+
+因此不要自行把 PDF 全部轉成一個 TXT 再交給 `prepare-pdf`。
+
+---
+
+# 2.10 一份完整的「轉 Markdown 前」資料範例
+
+假設目前有：
+
+```text
+1 個產品網頁
+1 份 PDF Application Note
+```
+
+建議整理：
+
+```text
+data_photo_coupler/
+├── raw/
 │   ├── html/
+│   │   └── abc123.html
+│   │
 │   └── pdf/
-├── page_images/
-├── manifest.jsonl
-├── chunks.jsonl
-└── index/
-    ├── dense.npy
-    ├── sparse.jsonl
-    ├── chunks.jsonl
-    └── index_meta.json
+│       └── def456.pdf
+│
+├── text/
+│   └── abc123.txt
+│
+└── rag_ready/
+    └── documents.jsonl
 ```
 
-用途如下：
+`documents.jsonl`：
 
-| 路徑 | 用途 |
-|---|---|
-| `txt/html/` | HTML 經過文字萃取後的中間結果 |
-| `md/html/` | HTML / TXT 經 Qwen3.5-4B 整理後的 Markdown |
-| `md/pdf/` | PDF 每頁經 Qwen3.5-4B 轉換後的 Markdown |
-| `page_images/` | PDF render 成的頁面影像 |
-| `manifest.jsonl` | 前處理文件索引與來源資訊 |
-| `chunks.jsonl` | Markdown 切分後的 Chunk |
-| `index/` | BGE-M3 Dense / Sparse Retrieval Index |
+```json
+{"document_id":"abc123","source_kind":"html","title":"8Pin Wide Body | 億光電子","source_url":"https://www.everlight.com/example-product/","raw_path":"raw/html/abc123.html","text_path":"text/abc123.txt","language":"zh-TW","page_count":null}
+{"document_id":"def456","source_kind":"pdf","title":"IGBT Gate Driver Application Note","source_url":"https://www.everlight.com/download/example.pdf","raw_path":"raw/pdf/def456.pdf","text_path":null,"language":"zh-TW","page_count":12}
+```
+
+確認這些檔案真的存在：
+
+```text
+DATA_DIR/raw/html/abc123.html
+DATA_DIR/text/abc123.txt
+DATA_DIR/raw/pdf/def456.pdf
+DATA_DIR/rag_ready/documents.jsonl
+```
+
+之後才執行：
+
+```bash
+python rag.py inspect
+```
+
+再進行：
+
+```bash
+python rag.py prepare-html
+python rag.py prepare-pdf
+```
 
 ---
 
-## 2.3 Batch Evaluation JSONL 格式
+# 2.11 `python rag.py inspect` 應該先確認什麼
 
-批次評估最小輸入只需要：
+完成來源整理後，先執行：
 
-```json
-{"id": 1, "question": "EL817 的 CTR 是多少？"}
+```bash
+python rag.py inspect
 ```
 
-也可以保留額外的 Ground Truth：
-
-```json
-{
-  "id": 1,
-  "category": "客戶可能問的問題",
-  "question": "EL817 的 CTR 是多少？",
-  "ground_truth": "...",
-  "source_url": "..."
-}
-```
-
-批次測試時，真正送進 RAG Pipeline 的只有：
+主要確認：
 
 ```text
-question
+raw_html_files
+raw_pdf_files
+crawler_txt_files
+db_html_documents
+db_pdf_documents
+db_pdf_pages
 ```
 
-其他 Ground Truth、Reference Source、Source URL 等資訊只用於推論完成後的評估紀錄，不會提供給：
+如果：
 
 ```text
-Query Analyzer
-Retrieval
-Reranker
-Reviewer
-Answer Model
+raw_html_files > 0
 ```
 
-因此測試資料中的標準答案不會參與 RAG 推論。
+但：
+
+```text
+db_html_documents = 0
+```
+
+通常代表：
+
+```text
+HTML 檔案雖然存在
+但 Metadata 沒有正確建立
+```
+
+同樣地，如果 PDF 已經放到：
+
+```text
+raw/pdf/
+```
+
+但 Metadata 沒有：
+
+```text
+source_kind = "pdf"
+raw_path = "raw/pdf/xxx.pdf"
+```
+
+`prepare-pdf` 也不會處理它。
+
+所以：
+
+> 「檔案存在」與「Metadata 有登記」兩件事都必須成立。
+
+---
+
+# 2.12 Markdown 轉換之後會自動建立什麼
+
+來源格式正確後：
+
+```bash
+python rag.py prepare-html
+```
+
+會產生：
+
+```text
+rag_v6/md/html/<document_id>.md
+```
+
+Markdown Front Matter 會保存：
+
+```text
+document_id
+source_kind
+title
+source_url
+source_raw_path
+source_txt_path
+language
+```
+
+PDF：
+
+```bash
+python rag.py prepare-pdf
+```
+
+則會產生：
+
+```text
+rag_v6/md/pdf/<document_id>/page_0001.md
+rag_v6/md/pdf/<document_id>/page_0002.md
+...
+```
+
+並保存：
+
+```text
+document_id
+source_kind
+title
+source_url
+source_raw_path
+page_number
+page_count
+page_image
+vlm_context_pages
+vlm_context_radius
+language
+```
+
+另外會更新：
+
+```text
+rag_v6/manifest.jsonl
+```
+
+因此：
+
+```text
+原始來源 Metadata
+        ↓
+Markdown Front Matter
+        ↓
+Chunk Metadata
+        ↓
+Retrieval Evidence
+```
+
+來源 URL 與 Document ID 會一路被保留下來。
+
+---
+
+# 2.13 交付時建議 IT 遵守的資料新增流程
+
+未來若要加入新資料，建議固定使用以下順序：
+
+```text
+① 下載原始 HTML / PDF
+        ↓
+② HTML 額外抽取 TXT（可選，但建議）
+        ↓
+③ 產生唯一 document_id
+        ↓
+④ 將檔案放到：
+   raw/html/
+   raw/pdf/
+   text/
+        ↓
+⑤ 更新 everlight.db
+   或 rag_ready/documents.jsonl
+        ↓
+⑥ python rag.py inspect
+        ↓
+⑦ prepare-html / prepare-pdf
+        ↓
+⑧ chunk
+        ↓
+⑨ index
+        ↓
+⑩ 問答測試
+```
+
+這樣可以確保新文件的：
+
+```text
+原始檔案
+來源 URL
+標題
+document_id
+Markdown
+Chunk
+Index
+```
+
+可以完整追溯。
 
 ---
 
