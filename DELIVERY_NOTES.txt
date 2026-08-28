@@ -1,0 +1,56 @@
+本版交付修正重點
+==================
+
+1. rag_loop_v2.py / rag_loop_v3.py 恢復為「批次 JSONL 執行器」
+   - 使用 --input 讀 JSONL
+   - 使用 --output 寫 JSONL
+   - 支援 --resume / --limit / --fail-fast
+   - 每題獨立回答
+
+2. 新增 rag_ans_v2.py / rag_ans_v3.py
+   - 在 Terminal 可連續輸入多個問題
+   - 模型只載入一次
+   - 每個問題獨立，不保存前一題對話歷史
+   - exit / quit / q 離開
+
+3. V2 / V3 共用核心 RAGPipeline
+   - V2：單輪 Retrieval
+   - V3：Retrieval Review + keyword rewrite，最多 3 輪
+
+4. 新增 rag_app/qa/batch.py
+   - 集中 JSONL 讀寫、resume、錯誤處理與 Fair-Test Boundary
+
+5. 新增 rag_app/qa/confidence.py
+   - 環境支援時保留 generated_token_probability
+   - 不支援時批次仍可正常執行，欄位為 None
+
+6. Top-K、Candidate-K、RRF、Reranker、V3 最大輪數仍統一由 rag_app/config.py 管理
+
+7. README.md / DESIGN.md 已更新為中文，並明確區分 rag_loop 與 rag_ans。
+
+常用指令
+========
+
+批次 V2：
+python rag_loop_v2.py --input questions.jsonl --output out_v2.jsonl
+
+批次 V3：
+python rag_loop_v3.py --input questions.jsonl --output out_v3.jsonl
+
+終端 V2：
+python rag_ans_v2.py
+
+終端 V3：
+python rag_ans_v3.py --debug
+
+8. Exact Product Filter 改為 document-level（V2/V3 全版本共用）
+   - 先在原始 BGE Candidate-K 找 exact model 命中 chunk
+   - 命中後保留 Candidate-K 中同 document_id 的所有 chunks
+   - 不會從 Candidate-K 之外額外擴張資料
+   - rag_loop_v2 / rag_loop_v3 / rag_ans_v2 / rag_ans_v3 全部透過共用 RAGPipeline 套用
+
+2026-08-28 Final-answer neighbor context update
+- Exact Product Filter 維持：只在 BGE Candidate Top-50 中依 exact model 命中文件篩選；同 document candidate 保留。
+- Reranker 後的每個 Final Top-K evidence，最終 Qwen 文字 prompt 額外補同 document 前/後各 1 chunk。
+- 鄰近 chunk 不參與 reranking，不增加 S-label，不增加 PDF images。
+- 設定：rag_app/config.py -> answer_neighbor_chunk_radius = 1。

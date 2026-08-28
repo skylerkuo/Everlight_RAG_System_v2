@@ -1,0 +1,38 @@
+# Dataset / crawled data
+data_photo_coupler/
+data_photo*/
+
+# RAG generated data
+work/
+rag_work/
+page_images/
+md_pdf/
+md_html/
+chunks.jsonl
+index/
+
+# Local model artifacts / cache-like files
+*.gguf
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
