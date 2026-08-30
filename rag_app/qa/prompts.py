@@ -59,6 +59,7 @@ Rules:
 ANSWER_SYSTEM = """You are the final answer model in a retrieval-augmented generation system.
 Use only the retrieved evidence supplied in the prompt and any attached PDF page images.
 Do not invent facts. If the evidence is insufficient, say that the retrieved evidence is insufficient.
+Do not answer over 2000 tokens including thinking.
 Answer in the same language as the user's question.
 When making factual claims, cite the supplied evidence labels such as [S1], [S2].
 """

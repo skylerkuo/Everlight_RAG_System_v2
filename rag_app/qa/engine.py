@@ -40,6 +40,7 @@ class RAGEngine:
             image_paths=images,
             system=ANSWER_SYSTEM,
             max_new_tokens=self.settings.qwen_max_new_tokens_answer,
+            enable_thinking=True,
         )
         return {
             "answer": answer,

@@ -66,6 +66,7 @@ class Qwen35VL:
         image_labels: Sequence[str] | None = None,
         system: str | None = None,
         max_new_tokens: int = 1024,
+        enable_thinking: bool = False,
     ) -> str:
 
         paths = list(image_paths or [])
@@ -137,7 +138,7 @@ class Qwen35VL:
                 tokenize=True,
                 return_dict=True,
                 return_tensors="pt",
-                enable_thinking=False,
+                enable_thinking=enable_thinking,
             ).to(self.model.device)
 
             output_ids = self.model.generate(
@@ -151,8 +152,19 @@ class Qwen35VL:
                 inputs["input_ids"].shape[-1] :
             ]
 
-            return self.processor.decode(
+            decoded_text = self.processor.decode(
                 generated_ids,
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             ).strip()
+
+            # Qwen thinking mode may return:
+            # reasoning text...
+            # </think>
+            # final answer...
+            #
+            # Keep thinking enabled internally, but return only the final answer.
+            if enable_thinking and "</think>" in decoded_text:
+                decoded_text = decoded_text.rsplit("</think>", 1)[-1].strip()
+
+            return decoded_text

@@ -17,7 +17,7 @@ from pathlib import Path
 DATA_DIR = Path(
     os.environ.get(
         "RAG_DATA_DIR",
-        "/home/.../data_photo_coupler_v2", # path to your data
+        "/home/???/data_photo_coupler", # path to your data
     )
 ).expanduser()
 
@@ -77,7 +77,7 @@ class Settings:
     qwen_image_scale: float = 0.5
     qwen_max_new_tokens_html: int = 1800
     qwen_max_new_tokens_page: int = 2200
-    qwen_max_new_tokens_answer: int = 1000
+    qwen_max_new_tokens_answer: int = 4000
     qwen_max_new_tokens_query_analyzer: int = 160
     qwen_max_new_tokens_retrieval_review: int = 240
 
