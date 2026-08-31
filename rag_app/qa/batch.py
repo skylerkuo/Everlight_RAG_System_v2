@@ -66,7 +66,10 @@ def extract_evaluation_reference(row: dict[str, Any]) -> dict[str, Any]:
     return {str(k): v for k, v in row.items() if k not in excluded}
 
 
-def _final_top_k_from_result(result: dict[str, Any], max_content_chars: int) -> list[dict[str, Any]]:
+def _final_top_k_from_result(
+    result: dict[str, Any],
+    max_content_chars: int,
+) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for rank, item in enumerate(result.get("results", []), start=1):
         if not isinstance(item, dict):
@@ -95,7 +98,8 @@ def _final_top_k_from_result(result: dict[str, Any], max_content_chars: int) -> 
 def build_batch_parser(mode: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            f"RAG {mode.upper()} 批次 JSONL 執行器。Top-K、Candidate-K、RRF、Reranker 等參數統一讀取 rag_app/config.py。"
+            f"RAG {mode.upper()} 批次 JSONL 執行器。"
+            "Top-K、Candidate-K、RRF、Reranker 等參數統一讀取 rag_app/config.py。"
         )
     )
     parser.add_argument("--input", required=True, help="輸入 JSONL，每行至少需要 question")
@@ -108,6 +112,14 @@ def build_batch_parser(mode: str) -> argparse.ArgumentParser:
         type=int,
         default=12000,
         help="final_top_k 每筆 evidence 最多保存字元數；0 代表不限",
+    )
+    parser.add_argument(
+        "--enable-confidence",
+        action="store_true",
+        help=(
+            "啟用 generated_token_probability 信心度計算。"
+            "預設關閉，以避免 generate() 使用 output_scores=True 額外占用 GPU VRAM。"
+        ),
     )
     parser.add_argument("--verbose", action="store_true", help="開啟詳細 log")
     return parser
@@ -157,12 +169,35 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
     pipeline = RAGPipeline(settings)
     ask = pipeline.ask_v3 if mode == "v3" else pipeline.ask_v2
 
+    # ------------------------------------------------------------------
+    # generated_token_probability 預設關閉
+    # ------------------------------------------------------------------
+    # 原本這裡會無條件安裝 GeneratedTokenProbabilityCapture，進而在
+    # Hugging Face model.generate() 中強制：
+    #   return_dict_in_generate=True
+    #   output_scores=True
+    #
+    # output_scores=True 會保留每一個 generated token 的 vocabulary scores，
+    # 回答較長時可能顯著增加 GPU VRAM 使用量。
+    #
+    # 現在只有使用者明確加入 --enable-confidence 時才啟用。
     confidence_capture: GeneratedTokenProbabilityCapture | None = None
-    try:
-        confidence_capture = GeneratedTokenProbabilityCapture(pipeline.engine.answer_model)
-        confidence_capture.install()
-    except Exception as exc:
-        print(f"[WARN] 無法啟用 generated_token_probability：{exc}")
+
+    enable_confidence = bool(getattr(args, "enable_confidence", False))
+    if enable_confidence:
+        try:
+            confidence_capture = GeneratedTokenProbabilityCapture(
+                pipeline.engine.answer_model
+            )
+            confidence_capture.install()
+            print("[INFO] generated_token_probability: ENABLED")
+            print("[INFO] 注意：confidence 會啟用 output_scores=True，增加 GPU VRAM 使用量")
+        except Exception as exc:
+            print(f"[WARN] 無法啟用 generated_token_probability：{exc}")
+            confidence_capture = None
+    else:
+        print("[INFO] generated_token_probability: DISABLED")
+        print("[INFO] 不使用 output_scores=True，以降低 GPU VRAM 使用量")
 
     success = 0
     failed = 0
@@ -195,13 +230,19 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
                 confidence_capture.reset()
 
             result = ask(question)
-            final_top_k = _final_top_k_from_result(result, args.max_content_chars)
+            final_top_k = _final_top_k_from_result(
+                result,
+                args.max_content_chars,
+            )
 
             record.update(
                 {
                     "mode": result.get("mode"),
                     "keywords": result.get("keywords", []),
-                    "initial_keywords": result.get("initial_keywords", result.get("keywords", [])),
+                    "initial_keywords": result.get(
+                        "initial_keywords",
+                        result.get("keywords", []),
+                    ),
                     "proper_nouns": result.get("proper_nouns", []),
                     "search_round_count": result.get("search_round_count", 1),
                     "search_stop_reason": result.get("search_stop_reason"),
@@ -209,15 +250,31 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
                     "candidate_top_k": settings.candidate_k,
                     "final_top_k_count": len(final_top_k),
                     "reranker_enabled": settings.reranker_enabled,
-                    "reranker_model": settings.reranker_model_id if settings.reranker_enabled else None,
+                    "reranker_model": (
+                        settings.reranker_model_id
+                        if settings.reranker_enabled
+                        else None
+                    ),
                     "model_answer": result.get("answer"),
                     "final_top_k": final_top_k,
+                    # 即使 confidence 關閉仍保留欄位，維持 JSONL schema 相容。
                     "generated_token_probability": (
-                        confidence_capture.last_probability if confidence_capture is not None else None
+                        confidence_capture.last_probability
+                        if confidence_capture is not None
+                        else None
                     ),
-                    "answer_neighbor_chunk_radius": result.get("answer_neighbor_chunk_radius", settings.answer_neighbor_chunk_radius),
-                    "answer_context_neighbors": result.get("answer_context_neighbors", []),
-                    "attached_pdf_images": result.get("attached_pdf_images", []),
+                    "answer_neighbor_chunk_radius": result.get(
+                        "answer_neighbor_chunk_radius",
+                        settings.answer_neighbor_chunk_radius,
+                    ),
+                    "answer_context_neighbors": result.get(
+                        "answer_context_neighbors",
+                        [],
+                    ),
+                    "attached_pdf_images": result.get(
+                        "attached_pdf_images",
+                        [],
+                    ),
                 }
             )
 
@@ -225,6 +282,7 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
             if evaluation_reference:
                 record["evaluation_reference"] = evaluation_reference
             success += 1
+
         except Exception as exc:
             record.update(
                 {
@@ -241,18 +299,30 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
             if evaluation_reference:
                 record["evaluation_reference"] = evaluation_reference
             failed += 1
+
             if args.fail_fast:
-                record["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+                record["elapsed_seconds"] = round(
+                    time.perf_counter() - started,
+                    3,
+                )
                 append_jsonl(output_path, record)
                 raise
 
-        record["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        record["elapsed_seconds"] = round(
+            time.perf_counter() - started,
+            3,
+        )
         append_jsonl(output_path, record)
 
         probability = record.get("generated_token_probability")
-        probability_text = "N/A" if probability is None else f"{float(probability):.6f}"
+        probability_text = (
+            "N/A"
+            if probability is None
+            else f"{float(probability):.6f}"
+        )
         print(
-            f"status={record['status']} final_top_k={len(record.get('final_top_k', []))} "
+            f"status={record['status']} "
+            f"final_top_k={len(record.get('final_top_k', []))} "
             f"rounds={record.get('search_round_count', 0)} "
             f"generated_token_probability={probability_text} "
             f"time={record.get('elapsed_seconds')}s"
