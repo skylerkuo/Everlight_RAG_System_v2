@@ -83,7 +83,7 @@ class Settings:
 
     # ---------- Final answer verification ----------
     # 最終回答採 no-thinking；Verifier 只核對具體工程錯誤，必要時才做受限修正。
-    answer_verifier_enabled: bool = True
+    answer_verifier_enabled: bool = False
     qwen_max_new_tokens_verifier: int = 600
     qwen_max_new_tokens_correction: int = 1200
 
