@@ -256,6 +256,20 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
                         else None
                     ),
                     "model_answer": result.get("answer"),
+                    "draft_answer": result.get("draft_answer"),
+                    "verifier_enabled": result.get(
+                        "verifier_enabled",
+                        settings.answer_verifier_enabled,
+                    ),
+                    "verifier_verdict": result.get("verifier_verdict"),
+                    "verifier_issues": result.get("verifier_issues", []),
+                    "verifier_parse_ok": result.get("verifier_parse_ok"),
+                    "verifier_applied_fix": result.get(
+                        "verifier_applied_fix", False
+                    ),
+                    "answer_seconds": result.get("answer_seconds"),
+                    "verifier_seconds": result.get("verifier_seconds"),
+                    "correction_seconds": result.get("correction_seconds"),
                     "final_top_k": final_top_k,
                     # 即使 confidence 關閉仍保留欄位，維持 JSONL schema 相容。
                     "generated_token_probability": (
@@ -288,6 +302,15 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
                 {
                     "status": "error",
                     "model_answer": None,
+                    "draft_answer": None,
+                    "verifier_enabled": settings.answer_verifier_enabled,
+                    "verifier_verdict": None,
+                    "verifier_issues": [],
+                    "verifier_parse_ok": None,
+                    "verifier_applied_fix": False,
+                    "answer_seconds": None,
+                    "verifier_seconds": None,
+                    "correction_seconds": None,
                     "final_top_k": [],
                     "generated_token_probability": None,
                     "error_type": type(exc).__name__,
@@ -325,6 +348,8 @@ def run_batch(mode: str, args: argparse.Namespace) -> int:
             f"final_top_k={len(record.get('final_top_k', []))} "
             f"rounds={record.get('search_round_count', 0)} "
             f"generated_token_probability={probability_text} "
+            f"verifier={record.get('verifier_verdict')} "
+            f"fixed={record.get('verifier_applied_fix', False)} "
             f"time={record.get('elapsed_seconds')}s"
         )
 

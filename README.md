@@ -1,19 +1,8 @@
 # Everlight 本地 RAG 系統
 
-本專案為億光電子技術文件的本地 Retrieval-Augmented Generation（RAG）系統。
+本專案為億光電子技術文件設計的本地 Retrieval-Augmented Generation（RAG）系統，主要處理 HTML、TXT 與 PDF 技術資料，並針對產品型號、規格、表格、頁碼與工程條件進行檢索與問答。
 
-資料來源可包含 HTML、TXT 與 PDF。系統會先將原始資料整理為 Markdown，再進行 Chunk、BGE-M3 Dense + Sparse 混合檢索、Weighted RRF、Exact Product Filter、BGE Reranker，最後由 Qwen3.5-4B 根據檢索到的 Evidence 產生回答。
-
-目前系統採用**單輪 Retrieval**：
-
-- 每一個問題彼此獨立。
-- 不保留上一題的對話歷史。
-- Retrieval 完成後，由 Qwen3.5-4B 進行最終答案生成。
-- 最終 Answer 階段可選擇是否啟用 Thinking。
-
----
-
-## 1. 系統流程
+目前系統的核心流程為：
 
 ```text
 HTML / TXT / PDF
@@ -34,24 +23,54 @@ BGE Reranker
         ↓
 Final Top-K
         ↓
-補入同文件前後相鄰 Chunk
+Neighbor Chunk + PDF Page Image
         ↓
-Qwen3.5-4B
+Qwen3.5-4B Answer（Thinking OFF）
+        ↓
+Evidence Verifier（Thinking OFF）
+        ↓
+PASS ─────────────→ Final Answer
+FIX / 需要修正
+        ↓
+Constrained Correction（Thinking OFF）
+        ↓
 Final Answer
-Thinking 可開 / 關
-        ↓
-移除 Thinking 內容
-        ↓
-只輸出 Final Answer
 ```
 
-系統將 Retrieval 與 Answer Generation 分開處理。
-
-前段負責找出最相關的文件內容，最後才由 Qwen3.5-4B 根據 Final Top-K Evidence 與 Neighbor Chunk 進行答案生成。
+系統將「資料前處理」、「Retrieval」、「Reranking」、「Answer Generation」與「Answer Verification」分開處理，便於獨立測試與調整。
 
 ---
 
-# 2. 資料準備
+## 1. 主要特色
+
+- 支援 HTML、TXT、PDF 技術文件。
+- PDF 以 PyMuPDF render 成頁面影像，再由 Qwen3.5-4B 轉為 Markdown。
+- 使用 BGE-M3 同時進行 Dense 與 Sparse Retrieval。
+- 使用 Weighted RRF 合併 Dense / Sparse 排名。
+- 支援 Exact Product Filter，強化產品型號查詢。
+- 使用 `BAAI/bge-reranker-v2-m3` 對 Candidate 重新排序。
+- Final Top-K 會補入同文件前後相鄰 Chunk。
+- PDF Evidence 可同時提供原始頁面影像給 Answer Model 核對。
+- Final Answer 預設不啟用 Thinking。
+- Answer 完成後再執行 Evidence Verifier，檢查型號、數值、單位、條件、公式與前後矛盾。
+- Confidence 功能預設關閉，需要時才手動開啟。
+- 支援單題問答與 JSONL Batch Evaluation。
+
+---
+
+## 2. 使用模型
+
+| 模型 | 用途 |
+|---|---|
+| `Qwen/Qwen3.5-4B` | HTML / PDF 資料整理、Query Analysis、Answer、Verifier、Correction |
+| `BAAI/bge-m3` | Dense + Sparse Retrieval |
+| `BAAI/bge-reranker-v2-m3` | Candidate Reranking |
+
+目前不需要更換模型即可完成整個 Pipeline。
+
+---
+
+## 3. 資料目錄
 
 預設資料路徑：
 
@@ -59,13 +78,13 @@ Thinking 可開 / 關
 /home/????/data_photo_coupler
 ```
 
-也可自行設定：
+也可以自行指定：
 
 ```bash
 export RAG_DATA_DIR=/your/path/data_photo_coupler
 ```
 
-轉 Markdown 前，來源資料建議整理為：
+建議原始資料整理如下：
 
 ```text
 DATA_DIR/
@@ -78,9 +97,7 @@ DATA_DIR/
     └── documents.jsonl
 ```
 
----
-
-## 2.1 HTML / TXT
+### 3.1 HTML / TXT
 
 建議同時保留：
 
@@ -89,23 +106,17 @@ raw/html/<document_id>.html
 text/<document_id>.txt
 ```
 
-若 TXT 已存在，系統會優先使用 TXT。
+若 TXT 已存在，系統會優先使用 TXT；沒有 TXT 時才從 HTML 擷取文字。
 
-若沒有 TXT，則會從 HTML 擷取文字。
+### 3.2 PDF
 
----
-
-## 2.2 PDF
-
-原始 PDF 放置於：
+原始 PDF：
 
 ```text
 raw/pdf/<document_id>.pdf
 ```
 
-後續系統會使用 PyMuPDF 將 PDF render 成頁面影像，再交由 Qwen3.5-4B 轉換成 Markdown。
-
-處理流程：
+處理方式：
 
 ```text
 PDF
@@ -119,11 +130,11 @@ Qwen3.5-4B
 Markdown
 ```
 
----
+這種方式適合包含大量表格、圖表、產品選型表與圖片式內容的技術 PDF。
 
-## 2.3 Metadata
+### 3.3 Metadata
 
-文件 Metadata 可由：
+Metadata 可由以下來源取得：
 
 ```text
 everlight.db
@@ -134,8 +145,6 @@ everlight.db
 ```text
 rag_ready/documents.jsonl
 ```
-
-取得。
 
 `documents.jsonl` 範例：
 
@@ -148,43 +157,9 @@ rag_ready/documents.jsonl
 
 ---
 
-# 3. 爬蟲參考程式
+## 4. 環境安裝
 
-專案中可放置：
-
-```text
-tools/everlight_crawler_reference.py
-```
-
-此程式主要提供未來重新收集或新增億光公開資料時參考。
-
-它不是 RAG 啟動必要程式。
-
-爬蟲輸出整理為：
-
-```text
-raw/html/
-raw/pdf/
-text/
-everlight.db
-rag_ready/documents.jsonl
-```
-
-資料收集完成後，即可進入 RAG 前處理：
-
-```bash
-python rag.py inspect
-python rag.py prepare-html
-python rag.py prepare-pdf
-python rag.py chunk
-python rag.py index
-```
-
----
-
-# 4. 環境安裝
-
-請先依主機 GPU 與 CUDA 環境，自行安裝適合版本的 **PyTorch**。
+請先依 GPU 與 CUDA 環境安裝適合版本的 PyTorch。
 
 其餘套件：
 
@@ -192,87 +167,47 @@ python rag.py index
 pip install -r requirements.txt
 ```
 
-目前主要模型：
-
-```text
-Qwen/Qwen3.5-4B
-BAAI/bge-m3
-BAAI/bge-reranker-v2-m3
-```
-
-主要用途：
-
-| 模型 | 用途 |
-|---|---|
-| Qwen3.5-4B | HTML / PDF 資料整理與最終答案生成 |
-| BGE-M3 | Dense + Sparse Retrieval |
-| BGE Reranker v2 M3 | Candidate 重排序 |
-
 ---
 
-# 5. 資料前處理
+## 5. 建立 RAG 資料
 
-先確認資料路徑：
+### 5.1 確認路徑
 
 ```bash
 python rag.py paths
 ```
 
-確認來源文件：
+### 5.2 檢查來源資料
 
 ```bash
 python rag.py inspect
 ```
 
----
-
-## 5.1 HTML / TXT → Markdown
+### 5.3 HTML / TXT → Markdown
 
 ```bash
 python rag.py prepare-html
 ```
 
----
-
-## 5.2 PDF → Markdown
+### 5.4 PDF → Markdown
 
 ```bash
 python rag.py prepare-pdf
 ```
 
-PDF 會先 render 成頁面影像：
-
-```text
-PDF
- ↓
-Page Image
- ↓
-Qwen3.5-4B
- ↓
-Markdown
-```
-
----
-
-## 5.3 建立 Chunk
+### 5.5 建立 Chunk
 
 ```bash
 python rag.py chunk
 ```
 
----
-
-## 5.4 建立 Index
+### 5.6 建立 Index
 
 ```bash
 python rag.py index
 ```
 
----
-
-## 5.5 處理結果
-
-主要產物位於：
+處理完成後，主要產物位於：
 
 ```text
 DATA_DIR/rag_v6/
@@ -285,27 +220,22 @@ DATA_DIR/rag_v6/
 └── index/
 ```
 
-如果：
-
-- Markdown 沒有變動
-- Chunk 沒有變動
-- Embedding 沒有變動
-
-後續問答時不需要重新建立 Index。
+若 Markdown、Chunk 與 Embedding 沒有變動，後續問答不需要重新建立 Index。
 
 ---
 
-# 6. Retrieval 流程
+## 6. Retrieval Pipeline
 
-目前 Retrieval 主要流程：
+目前 Retrieval 流程：
 
 ```text
 User Question
       ↓
-BGE-M3
-Dense Retrieval
-+
-Sparse Retrieval
+Query Analysis
+      ↓
+BGE-M3 Dense Retrieval
+      +
+BGE-M3 Sparse Retrieval
       ↓
 Weighted RRF
       ↓
@@ -318,32 +248,14 @@ BGE Reranker
 Final Top-K
 ```
 
----
+### 6.1 Dense + Sparse Retrieval
 
-## 6.1 BGE-M3 Dense + Sparse Retrieval
+BGE-M3 同時提供：
 
-BGE-M3 同時產生：
+- **Dense Retrieval**：偏重語意相似度。
+- **Sparse Retrieval**：偏重 Keyword / Token Matching，對產品型號、數字與專有名詞特別重要。
 
-```text
-Dense Score
-Sparse Score
-```
-
-Dense Retrieval 主要負責：
-
-```text
-語意相似度
-```
-
-Sparse Retrieval 則較偏向：
-
-```text
-Keyword / Token Matching
-```
-
-之後使用 Weighted RRF 合併兩組搜尋結果。
-
-目前設定：
+目前 Weighted RRF 設定：
 
 ```python
 rrf_dense_weight = 0.40
@@ -351,7 +263,7 @@ rrf_sparse_weight = 0.60
 rrf_k = 60
 ```
 
-也就是：
+即：
 
 ```text
 Dense  = 40%
@@ -360,7 +272,7 @@ Sparse = 60%
 
 ---
 
-# 7. Exact Product Filter
+## 7. Exact Product Filter
 
 如果問題中包含明確產品型號，例如：
 
@@ -370,91 +282,62 @@ EL3120
 ELM453
 ```
 
-系統會先檢查 Candidate 中哪些 Chunk 包含該產品型號。
+系統會在 Candidate 中尋找包含該產品型號的 Chunk，取得對應 `document_id`，再保留 Candidate 中屬於相同產品文件的相關 Chunk。
 
-例如：
+概念如下：
 
 ```text
 Question
-    ↓
+   ↓
 EL3120
-    ↓
+   ↓
 Candidate Top-K
-    ↓
-尋找包含 EL3120 的 Chunk
-    ↓
-取得對應 document_id
+   ↓
+找到含 EL3120 的 Chunk
+   ↓
+取得 document_id
+   ↓
+保留同文件相關 Candidate
 ```
 
-之後會保留 Candidate 中同一個 `document_id` 的其他 Chunk。
-
-因此即使某個規格 Chunk 沒有再次出現：
-
-```text
-EL3120
-```
-
-只要它屬於相同產品文件，就不會因為沒有產品名稱而直接被刪除。
+這可降低「規格 Chunk 沒再次寫出型號」而被錯誤排除的情況。
 
 ---
 
-# 8. BGE Reranker
+## 8. BGE Reranker
 
-Candidate 經過初步 Retrieval 後，再交給：
+Candidate 經 Hybrid Retrieval 後，再交給：
 
 ```text
 BAAI/bge-reranker-v2-m3
 ```
 
-進行 Query-Document Pair 評分。
-
-流程：
+進行 Query-Document Pair 評分：
 
 ```text
 Candidate Top-K
       ↓
 BGE Reranker
       ↓
-重新計算相關性
+重新排序
       ↓
 Final Top-K
 ```
 
-目前主要設定：
+主要設定集中於 `rag_app/config.py`，例如：
 
 ```python
 candidate_k = 50
-top_k = 7
 reranker_enabled = True
 ```
 
-例如：
-
-```text
-Candidate = 50
-     ↓
-Reranker
-     ↓
-Final Top-K = 7
-```
-
-只有 Final Top-K 會成為最終 Answer Model 的主要 Evidence。
+`top_k` 請以目前 `config.py` 的實際設定為準。
 
 ---
 
-# 9. Neighbor Chunk
+## 9. Neighbor Chunk 與 PDF Evidence
 
-Reranker 選出 Final Top-K 後，系統會從同一份文件補入前後相鄰 Chunk。
-
-例如：
-
-```text
-Previous Chunk
-      ↓
-Main Chunk
-      ↓
-Next Chunk
-```
+Final Top-K 決定後，系統會補入同一文件的前後相鄰 Chunk。
 
 目前設定：
 
@@ -462,12 +345,12 @@ Next Chunk
 answer_neighbor_chunk_radius = 1
 ```
 
-因此每一個 Final Top-K Chunk 最多補：
+因此每個主要 Chunk 最多搭配：
 
 ```text
-前 1 Chunk
-主 Chunk
-後 1 Chunk
+Previous Chunk
+Main Chunk
+Next Chunk
 ```
 
 Neighbor Chunk：
@@ -476,29 +359,17 @@ Neighbor Chunk：
 - 不參與 Sparse Retrieval。
 - 不參與 Weighted RRF。
 - 不參與 BGE Reranker。
-- 只提供給最後的 Qwen Answer Model。
+- 只在最後 Answer 階段提供上下文。
 
-用途是避免：
-
-```text
-答案剛好跨 Chunk 邊界
-```
-
-導致模型只看到部分內容。
+若 Final Top-K 來源為 PDF，系統也可把對應頁面影像提供給 Qwen3.5-4B，協助核對表格、圖表與排版資訊。
 
 ---
 
-# 10. Final Answer Generation
+## 10. Answer Generation 與 Verifier
 
-Final Top-K 與 Neighbor Context 建立完成後，會交給：
+目前 Final Answer **不啟用 Thinking**。
 
-```text
-Qwen/Qwen3.5-4B
-```
-
-進行最終回答。
-
-流程：
+Answer 階段：
 
 ```text
 Final Top-K
@@ -508,335 +379,88 @@ Neighbor Chunk
 PDF Page Image
       ↓
 Qwen3.5-4B
-      ↓
-Final Answer
-```
-
-Final Answer Model 只應根據 Retrieval Evidence 回答問題。
-
----
-
-# 11. Thinking 模式
-
-目前系統支援讓 Qwen3.5-4B 在**最終 Answer Generation 階段**啟用 Thinking。
-
-設計目的為：
-
-```text
-Retrieval
-    ↓
-取得 Evidence
-    ↓
-Qwen Thinking
-    ↓
-分析多份 Evidence
-    ↓
-比較規格 / 數值
-    ↓
-必要時計算
-    ↓
-產生 Final Answer
-```
-
-Thinking 主要適合處理：
-
-- 多個 Evidence 的資訊整合
-- 規格比較
-- 公式計算
-- 條件判斷
-- 技術文件交叉判讀
-- 從多個 Chunk 中整理出最終答案
-
----
-
-## 11.1 Thinking 開關位置
-
-Thinking 的核心控制位於：
-
-```text
-rag_app/models/qwen35_vl.py
-```
-
-`generate()` 提供：
-
-```python
-enable_thinking: bool = False
-```
-
-例如：
-
-```python
-def generate(
-    self,
-    prompt: str,
-    image_paths=None,
-    image_labels=None,
-    system=None,
-    max_new_tokens: int = 1024,
-    enable_thinking: bool = False,
-) -> str:
-```
-
-因此預設狀態：
-
-```text
-Thinking = OFF
-```
-
-只有呼叫端明確指定：
-
-```python
-enable_thinking=True
-```
-
-才會進入 Thinking。
-
----
-
-# 12. 最終回答開啟 Thinking
-
-最終 Answer Generation 位於：
-
-```text
-rag_app/qa/engine.py
-```
-
-例如：
-
-```python
-answer = self.answer_model.generate(
-    build_answer_prompt(question, context_text),
-    image_paths=images,
-    system=ANSWER_SYSTEM,
-    max_new_tokens=self.settings.qwen_max_new_tokens_answer,
-    enable_thinking=True,
-)
-```
-
-其中：
-
-```python
-enable_thinking=True
-```
-
-代表：
-
-```text
-Final Answer Thinking = ON
-```
-
-因此模型會先進行推理，再產生答案。
-
----
-
-# 13. 關閉 Final Answer Thinking
-
-如果希望完全關閉 Thinking，只需要修改：
-
-```text
-rag_app/qa/engine.py
-```
-
-將：
-
-```python
-enable_thinking=True,
-```
-
-改成：
-
-```python
-enable_thinking=False,
-```
-
-完整範例：
-
-```python
-answer = self.answer_model.generate(
-    build_answer_prompt(question, context_text),
-    image_paths=images,
-    system=ANSWER_SYSTEM,
-    max_new_tokens=self.settings.qwen_max_new_tokens_answer,
-    enable_thinking=False,
-)
-```
-
-此時流程變成：
-
-```text
-Final Evidence
-      ↓
-Qwen3.5-4B
 Thinking OFF
       ↓
-直接產生答案
+Draft Answer
 ```
 
----
-
-# 14. Thinking 與 Final Answer 分離
-
-Qwen 開啟 Thinking 後，原始生成文字可能類似：
-
-```text
-先檢查 S1...
-比較 S2...
-計算規格...
-確認結果...
-</think>
-
-EL3120 的總功耗為 122.6 mW。
-```
-
-如果直接 Decode，Thinking 與最終答案可能會一起出現在：
-
-```json
-{
-  "model_answer": "思考內容...</think>最終答案..."
-}
-```
-
-因此目前：
-
-```text
-rag_app/models/qwen35_vl.py
-```
-
-會在 Decode 後自動移除 Thinking。
-
-核心處理：
-
-```python
-decoded_text = self.processor.decode(
-    generated_ids,
-    skip_special_tokens=True,
-    clean_up_tokenization_spaces=False,
-).strip()
-
-if enable_thinking and "</think>" in decoded_text:
-    decoded_text = decoded_text.rsplit("</think>", 1)[-1].strip()
-
-return decoded_text
-```
-
-也就是：
-
-```text
-Qwen 原始輸出
-      ↓
-Thinking
-      ↓
-</think>
-      ↓
-Final Answer
-      ↓
-rsplit("</think>", 1)
-      ↓
-刪除 Thinking
-      ↓
-只保留 Final Answer
-```
-
-例如原始結果：
-
-```text
-我需要先比較 EL3120 的功耗參數……
-PEmitter = ...
-PInternal = ...
-POutput = ...
-</think>
-
-EL3120 的總功耗為 122.6 mW。
-```
-
-最後系統只回傳：
-
-```text
-EL3120 的總功耗為 122.6 mW。
-```
-
-因此：
-
-**模型可以進行 Thinking，但使用者與 Batch JSONL 不會看到 Thinking 內容。**
-
----
-
-# 15. Thinking 設定總結
-
-目前建議設定：
-
-```text
-資料前處理
-Qwen3.5-4B
-Thinking OFF
-
-        ↓
-
-Retrieval
-BGE-M3
-不適用
-
-        ↓
-
-Weighted RRF
-不適用
-
-        ↓
-
-Exact Product Filter
-不適用
-
-        ↓
-
-BGE Reranker
-不適用
-
-        ↓
-
-Final Answer
-Qwen3.5-4B
-Thinking ON
-
-        ↓
-
-移除 </think> 前內容
-
-        ↓
-
-只輸出 Final Answer
-```
-
-如果要改 Final Answer Thinking：
-
-### 開啟
-
-```python
-enable_thinking=True
-```
-
-### 關閉
+`rag_app/qa/engine.py` 中的 Answer 呼叫應使用：
 
 ```python
 enable_thinking=False
 ```
 
-修改位置：
+### 10.1 Evidence Verifier
+
+Draft Answer 產生後，系統使用同一個 Qwen3.5-4B 進行一次受限檢查。
+
+Verifier 主要檢查：
+
+1. 核心結論是否回答題目。
+2. 產品型號是否正確。
+3. 關鍵數值是否與 Evidence 一致。
+4. 單位是否一致。
+5. 測試或操作條件是否一致。
+6. 公式與計算結果是否一致。
+7. 回答內部是否前後矛盾。
+
+Verifier 不應因為以下情況直接判錯：
+
+- 額外提到其他產品類別，但沒有改變核心答案。
+- 額外補充來源未直接支持的內容，但沒有與 Evidence 衝突，也沒有影響核心結論。
+- 文字較長、風格不同或缺少非必要細節。
+
+Verifier 可回傳：
 
 ```text
-rag_app/qa/engine.py
+pass
+fix
+insufficient
 ```
+
+典型流程：
+
+```text
+Draft Answer
+     ↓
+Verifier
+     ↓
+PASS ─────────────→ Draft Answer = Final Answer
+
+FIX / 需要修正
+     ↓
+Constrained Correction
+     ↓
+Final Answer
+```
+
+Correction 只允許修正 Verifier 明確指出的問題，不重新自由生成整份答案，也不應加入新的事實。
 
 ---
 
-# 16. 實際問答
+## 11. Confidence 功能
 
-啟動互動式問答：
+Confidence 功能目前**預設關閉**。
+
+一般問答或 Batch Evaluation 不需要啟用 Confidence，因此預設不額外計算 Generated Token Probability，以降低額外運算與記錄負擔。
+
+若需要進行 Confidence 實驗，再使用對應開關，例如：
+
+```bash
+--enable-confidence
+```
+
+如果沒有加上此參數，Confidence 維持 Disabled。
+
+---
+
+## 12. 實際問答
+
+### 12.1 互動式問答
 
 ```bash
 python rag_ans_v2.py
 ```
-
-進入後可連續輸入問題。
 
 例如：
 
@@ -844,41 +468,33 @@ python rag_ans_v2.py
 EL817 的 CTR 是多少？
 ```
 
-下一題：
+下一題可以直接繼續輸入：
 
 ```text
 EL3120 的總功耗如何計算？
 ```
 
-每一題彼此獨立：
+每一題彼此獨立，不會將上一題回答帶入下一題：
 
 ```text
 Question 1
    ↓
-完整 Retrieval + Answer
+完整 Retrieval + Answer + Verification
 
 Question 2
    ↓
-重新 Retrieval + Answer
+重新 Retrieval + Answer + Verification
 ```
 
-不會將上一題的回答內容帶入下一題。
-
----
-
-## 16.1 單次問題
-
-也可以直接：
+### 12.2 單次問題
 
 ```bash
 python rag_ans_v2.py --question "EL817 的 CTR 是多少？"
 ```
 
-執行完成後直接輸出答案。
-
 ---
 
-# 17. Batch JSONL 測試
+## 13. Batch JSONL Evaluation
 
 批次測試：
 
@@ -888,7 +504,7 @@ python rag_loop_v2.py \
   --output rag_model_outputs_v2.jsonl
 ```
 
-最小輸入格式：
+最小輸入：
 
 ```json
 {"id":1,"question":"EL817 的 CTR 是多少？"}
@@ -902,73 +518,55 @@ python rag_loop_v2.py \
 {"id":3,"question":"EL3120 的總功耗如何計算？"}
 ```
 
-Batch 推論時 RAG 只會讀取：
+RAG 推論只使用 `question`。
 
-```text
-question
-```
-
-Ground Truth：
+若輸入資料同時包含：
 
 ```text
 evaluation_reference
-```
-
-以及 Reference Source：
-
-```text
 source_url
 page_number
 source_excerpt
 ```
 
-只供推論完成後進行 Evaluation，不會提供給 RAG Answer Model。
+這些欄位只供推論完成後 Evaluation 使用，不會提供給 Answer Model 作為 Ground Truth。
 
----
+### 13.1 Batch Output
 
-# 18. Batch Output
-
-Batch Output 可包含：
+Batch Output 可記錄：
 
 ```text
 question
 keywords
 retrieval result
 final_top_k
+draft_answer
 model_answer
-generated_token_probability
+verifier_verdict
+verifier_issues
+verifier_parse_ok
+verifier_applied_fix
+answer_seconds
+verifier_seconds
+correction_seconds
 elapsed_seconds
 ```
 
 其中：
 
-```text
-model_answer
-```
+- `draft_answer`：Verifier 前的原始回答。
+- `model_answer`：完成 Verification / Correction 後的最終回答。
+- `verifier_verdict`：`pass`、`fix` 或 `insufficient`。
+- `verifier_issues`：Verifier 找出的具體問題。
+- `verifier_applied_fix`：是否真的執行修正。
 
-只保存最終答案。
+這些欄位可用來分析 Verifier 是否改善答案，或是否發生不必要修正。
 
-即使：
-
-```python
-enable_thinking=True
-```
-
-Thinking 內容也會在：
-
-```text
-qwen35_vl.py
-```
-
-中移除，因此不會寫入：
-
-```text
-model_answer
-```
+Confidence 預設關閉，因此一般 Batch 不需依賴 `generated_token_probability`。
 
 ---
 
-# 19. 主要設定
+## 14. 主要設定
 
 主要設定集中於：
 
@@ -976,39 +574,34 @@ model_answer
 rag_app/config.py
 ```
 
-常用參數：
+常用 Retrieval 設定：
 
 ```python
 candidate_k = 50
-top_k = 7
-
 rrf_dense_weight = 0.40
 rrf_sparse_weight = 0.60
 rrf_k = 60
-
 reranker_enabled = True
-
 answer_neighbor_chunk_radius = 1
 ```
 
-Final Answer 最大生成 Token 也可在 Config 中設定，例如：
+Final Top-K、Answer Token、Verifier Token 與 Correction Token 請以目前 `config.py` 為準。
+
+Verifier 可由 Config 控制，例如：
 
 ```python
-qwen_max_new_tokens_answer = 1600
+answer_verifier_enabled = True
 ```
 
-如果開啟 Thinking，需要注意 Thinking 本身也會使用 Generation Token，因此可依 GPU、延遲與答案完整度調整：
+Final Answer 與 Verifier 目前都使用：
 
-```text
-1000
-1500
-1600
-2048
+```python
+enable_thinking=False
 ```
 
 ---
 
-# 20. 建議執行順序
+## 15. 建議執行順序
 
 第一次建立資料：
 
@@ -1024,25 +617,20 @@ python rag.py prepare-html
 python rag.py prepare-pdf
 ```
 
-建立 Chunk：
+建立 Chunk 與 Index：
 
 ```bash
 python rag.py chunk
-```
-
-建立 Index：
-
-```bash
 python rag.py index
 ```
 
-完成後即可進行問答：
+完成後進行問答：
 
 ```bash
 python rag_ans_v2.py
 ```
 
-或直接輸入單一問題：
+或：
 
 ```bash
 python rag_ans_v2.py --question "EL817 的 CTR 是多少？"
@@ -1058,88 +646,97 @@ python rag_loop_v2.py \
 
 ---
 
-# 21. 整體架構摘要
+## 16. 專案架構重點
 
 ```text
-                         ┌────────────────────┐
-                         │ HTML / TXT / PDF   │
-                         └─────────┬──────────┘
-                                   │
-                                   ▼
-                         ┌────────────────────┐
-                         │ Markdown           │
-                         └─────────┬──────────┘
-                                   │
-                                   ▼
-                         ┌────────────────────┐
-                         │ Chunking           │
-                         └─────────┬──────────┘
-                                   │
-                                   ▼
-              ┌────────────────────────────────────┐
-              │ BGE-M3 Dense + Sparse Retrieval    │
-              └──────────────────┬─────────────────┘
+                          HTML / TXT / PDF
                                  │
                                  ▼
-                         ┌───────────────────┐
-                         │ Weighted RRF      │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ Candidate Top-K   │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ Exact Product     │
-                         │ Filter            │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ BGE Reranker      │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ Final Top-K       │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ Neighbor Chunk    │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ Qwen3.5-4B        │
-                         │ Thinking          │
-                         │ ON / OFF          │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ Remove Thinking   │
-                         │ </think>          │
-                         └─────────┬─────────┘
-                                   │
-                                   ▼
-                         ┌───────────────────┐
-                         │ Final Answer      │
-                         └───────────────────┘
+                              Markdown
+                                 │
+                                 ▼
+                              Chunking
+                                 │
+                                 ▼
+                    BGE-M3 Dense + Sparse
+                                 │
+                                 ▼
+                           Weighted RRF
+                                 │
+                                 ▼
+                         Candidate Top-K
+                                 │
+                                 ▼
+                      Exact Product Filter
+                                 │
+                                 ▼
+                          BGE Reranker
+                                 │
+                                 ▼
+                           Final Top-K
+                                 │
+                                 ▼
+                    Neighbor Chunk / PDF Image
+                                 │
+                                 ▼
+                      Qwen3.5-4B Answer
+                         Thinking OFF
+                                 │
+                                 ▼
+                           Draft Answer
+                                 │
+                                 ▼
+                      Qwen3.5-4B Verifier
+                         Thinking OFF
+                       ┌─────────┴─────────┐
+                       │                   │
+                     PASS                 FIX
+                       │                   │
+                       │                   ▼
+                       │       Constrained Correction
+                       │            Thinking OFF
+                       │                   │
+                       └─────────┬─────────┘
+                                 ▼
+                            Final Answer
 ```
 
-整體設計重點為：
+整體設計重點：
 
 ```text
 資料前處理
 → Hybrid Retrieval
 → Product-aware Filtering
 → Reranking
-→ Neighbor Context
-→ Thinking-based Answer Generation
-→ Final Answer Only
+→ Neighbor / PDF Evidence
+→ No-thinking Answer Generation
+→ Evidence Verification
+→ 必要時受限修正
+→ Final Answer
 ```
 
-使 Retrieval、Reasoning 與最終答案輸出彼此分離，同時保留工程文件檢索與技術問題推理能力。
+此設計讓 Retrieval、Answer 與 Verification 各自獨立，方便後續以同一組測試資料比較 Retrieval 命中率、回答正確率、Verifier 修正率與整體推論時間。
+
+---
+
+## 17. 爬蟲參考程式
+
+專案若包含：
+
+```text
+tools/everlight_crawler_reference.py
+```
+
+此程式僅供未來重新收集或新增億光公開資料時參考，不是 RAG 啟動的必要程式。
+
+資料收集完成後，只要整理回：
+
+```text
+raw/html/
+raw/pdf/
+text/
+everlight.db
+rag_ready/documents.jsonl
+```
+
+即可重新執行前處理、Chunk 與 Index 建立流程。

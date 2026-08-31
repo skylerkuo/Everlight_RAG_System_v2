@@ -17,7 +17,7 @@ from pathlib import Path
 DATA_DIR = Path(
     os.environ.get(
         "RAG_DATA_DIR",
-        "/home/skyler/Desktop/rag_everlight_delivery_neighbor_context/rag_everlight-main/data_photo_coupler", # path to your data
+        ".../data_photo_coupler", # path to your data
     )
 ).expanduser()
 
@@ -80,6 +80,12 @@ class Settings:
     qwen_max_new_tokens_answer: int = 1800
     qwen_max_new_tokens_query_analyzer: int = 160
     qwen_max_new_tokens_retrieval_review: int = 240
+
+    # ---------- Final answer verification ----------
+    # 最終回答採 no-thinking；Verifier 只核對具體工程錯誤，必要時才做受限修正。
+    answer_verifier_enabled: bool = True
+    qwen_max_new_tokens_verifier: int = 600
+    qwen_max_new_tokens_correction: int = 1200
 
     # ---------- BGE-M3 ----------
     bge_model_id: str = BGE_MODEL_ID
@@ -176,6 +182,10 @@ class Settings:
             raise ValueError("qwen_image_scale 必須 > 0")
         if self.answer_neighbor_chunk_radius < 0:
             raise ValueError("answer_neighbor_chunk_radius 必須 >= 0")
+        if self.qwen_max_new_tokens_verifier < 1:
+            raise ValueError("qwen_max_new_tokens_verifier 必須 >= 1")
+        if self.qwen_max_new_tokens_correction < 1:
+            raise ValueError("qwen_max_new_tokens_correction 必須 >= 1")
 
     def ensure_dirs(self) -> None:
         for path in (
@@ -218,6 +228,9 @@ class Settings:
             "rrf_k": self.rrf_k,
             "use_bge_pair_rerank": self.use_bge_pair_rerank,
             "reranker_enabled": self.reranker_enabled,
+            "answer_verifier_enabled": self.answer_verifier_enabled,
+            "qwen_max_new_tokens_verifier": self.qwen_max_new_tokens_verifier,
+            "qwen_max_new_tokens_correction": self.qwen_max_new_tokens_correction,
             "reranker_model_id": self.reranker_model_id,
             "max_search_rounds": self.max_search_rounds,
             "answer_neighbor_chunk_radius": self.answer_neighbor_chunk_radius,
